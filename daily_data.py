@@ -2,7 +2,6 @@ import pyodbc
 import yfinance as yf
 from datetime import date
 
-# ---- SQL Connection ----
 conn = pyodbc.connect(
     "DRIVER={ODBC Driver 17 for SQL Server};"
     "SERVER=localhost\\SQLEXPRESS;"
@@ -13,26 +12,27 @@ cursor = conn.cursor()
 
 today = date.today()
 
-# ---- Check if today's data already exists ----
-cursor.execute(
-    "SELECT COUNT(*) FROM DailyPrices WHERE PriceDate = ?", today
-)
-
+cursor.execute("SELECT COUNT(*) FROM DailyPrices WHERE PriceDate = ?", today)
 if cursor.fetchone()[0] > 0:
-    print("Today's data already exists in database!")
+    print("Today's data already exists")
     exit()
 
-# ---- Fetch prices from Yahoo Finance ----
-gold = yf.Ticker("GC=F").history(period="1d")["Close"].iloc[-1]
-silver = yf.Ticker("SI=F").history(period="1d")["Close"].iloc[-1]
+gold_df = yf.download("GC=F", period="10d")
+silver_df = yf.download("SI=F", period="10d")
 
-# ---- Insert into SQL ----
+if gold_df.empty or silver_df.empty:
+    print("Market closed or no data today")
+    exit()
+
+gold_price = float(gold_df["Close"].iloc[-1])
+silver_price = float(silver_df["Close"].iloc[-1])
+
 cursor.execute(
-    "INSERT INTO DailyPrices (PriceDate, GoldPrice, SilverPrice) VALUES (?, ?, ?)",
-    today, float(gold), float(silver)
+    "INSERT INTO DailyPrices VALUES (?, ?, ?)",
+    today, gold_price, silver_price
 )
 
 conn.commit()
 conn.close()
 
-print("Today's gold & silver prices added successfully!")
+print("Data added successfully")
