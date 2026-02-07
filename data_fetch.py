@@ -1,47 +1,77 @@
 import pyodbc
 import yfinance as yf
-import pandas as pd
 from datetime import date
 
-USD_INR = 91.68   # approx rate
+# ===== DB CONFIG =====
+SERVER = r"localhost\SQLEXPRESS"
+DB = "GoldSilverDB"
+TABLE = "DailyPrices"
 
-start_date = "2026-01-01"
-end_date = date.today().strftime("%Y-%m-%d")
+# ===== UNIT CONVERSIONS =====
+TROY_OUNCE_TO_GRAM = 31.1034768
+GOLD_10G_IN_TROY_OZ = 10 / TROY_OUNCE_TO_GRAM        # gold 10g
+SILVER_1KG_IN_TROY_OZ = 1000 / TROY_OUNCE_TO_GRAM    # silver 1kg
 
-# Fetch data
-gold_df = yf.download("GC=F", start=start_date, end=end_date)
-silver_df = yf.download("SI=F", start=start_date, end=end_date)
 
-# SQL connect
-conn = pyodbc.connect(
-    "DRIVER={ODBC Driver 17 for SQL Server};"
-    "SERVER=localhost\\SQLEXPRESS;"
-    "DATABASE=GoldSilverDB;"
-    "Trusted_Connection=yes;"
-)
-cursor = conn.cursor()
+def get_latest_close(ticker: str) -> tuple[float, str]:
+    """
+    Returns (close_price, close_date_str).
+    Uses last few days so weekend/holiday pe bhi last available mil jaye.
+    """
+    df = yf.Ticker(ticker).history(period="7d")
+    if df is None or df.empty:
+        raise ValueError(f"No data for {ticker}")
 
-for d in gold_df.index:
+    last_row = df.dropna().iloc[-1]
+    close_price = float(last_row["Close"])
+    close_date_str = df.dropna().index[-1].date().strftime("%Y-%m-%d")
+    return close_price, close_date_str
 
-    gold_usd = float(gold_df.loc[d]["Close"].iloc[0])
-    silver_usd = float(silver_df.loc[d]["Close"].iloc[0])
 
-    # Convert to Indian units
-    gold_inr_10g = gold_usd * USD_INR / 31.1 * 10
-    silver_inr_kg = silver_usd * USD_INR / 31.1 * 1000
+def upsert_daily(conn, price_date, gold_10g_inr, silver_1kg_inr):
+    cursor = conn.cursor()
+    cursor.execute(f"""
+        IF EXISTS (SELECT 1 FROM {TABLE} WHERE PriceDate = ?)
+            UPDATE {TABLE}
+            SET GoldPrice = ?, SilverPrice = ?
+            WHERE PriceDate = ?
+        ELSE
+            INSERT INTO {TABLE} (PriceDate, GoldPrice, SilverPrice)
+            VALUES (?, ?, ?)
+    """, price_date, gold_10g_inr, silver_1kg_inr, price_date,
+         price_date, gold_10g_inr, silver_1kg_inr)
 
-    # Avoid duplicates
-    cursor.execute(
-        "SELECT COUNT(*) FROM DailyPrices WHERE PriceDate = ?", d.date()
+
+def main():
+    today = date.today()  # DB me record aaj ki date se jayega
+
+    gold_usd_per_oz, gold_src_dt = get_latest_close("GC=F")
+    silver_usd_per_oz, silver_src_dt = get_latest_close("SI=F")
+    usd_inr, fx_src_dt = get_latest_close("USDINR=X")
+
+    gold_10g_inr = round(gold_usd_per_oz * usd_inr * GOLD_10G_IN_TROY_OZ, 2)
+    silver_1kg_inr = round(silver_usd_per_oz * usd_inr * SILVER_1KG_IN_TROY_OZ, 2)
+
+    conn = pyodbc.connect(
+        "DRIVER={ODBC Driver 17 for SQL Server};"
+        f"SERVER={SERVER};"
+        f"DATABASE={DB};"
+        "Trusted_Connection=yes;"
     )
 
-    if cursor.fetchone()[0] == 0:
-        cursor.execute(
-            "INSERT INTO DailyPrices VALUES (?, ?, ?)",
-            d.date(), gold_inr_10g, silver_inr_kg
-        )
+    try:
+        upsert_daily(conn, today, gold_10g_inr, silver_1kg_inr)
+        conn.commit()
+    finally:
+        conn.close()
 
-conn.commit()
-conn.close()
+    print("Saved for date:", today.strftime("%Y-%m-%d"))
+    print("Source dates -> Gold:", gold_src_dt, "Silver:", silver_src_dt, "USDINR:", fx_src_dt)
+    print("USDINR:", usd_inr)
+    print("Gold 10g INR:", gold_10g_inr)
+    print("Silver 1kg INR:", silver_1kg_inr)
 
-print("FULL DATA FROM JAN 1 TO TODAY SAVED SUCCESSFULLY!")
+
+if __name__ == "__main__":
+    main()
+print("Data added/updated successfully!")
